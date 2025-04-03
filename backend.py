@@ -5,19 +5,22 @@ from qdrant_client import QdrantClient, models
 from elasticsearch import Elasticsearch
 import os
 import fitz  # PyMuPDF
+import uvicorn
 
 app = FastAPI()
 
 # Load model & databases
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-qdrant = QdrantClient("http://localhost:6333")  # Connect to Qdrant container
+qdrant = QdrantClient("http://localhost:6333")  # Connect to Qdrant
 es = Elasticsearch("http://localhost:9200")
 
 INDEX_NAME = "pdf_documents"
 CHUNK_SIZE = 256  # 🔹 Reduce chunk size for better search results
 
+
 class QueryRequest(BaseModel):
     query: str
+
 
 @app.post("/search")
 def search_docs(request: QueryRequest):
@@ -38,13 +41,28 @@ def search_docs(request: QueryRequest):
 
     return {"answers": extracted_answers}
 
+
 def chunk_text(text, size=CHUNK_SIZE):
     """Splits text into smaller, overlapping chunks for better search accuracy."""
     words = text.split()
-    return [" ".join(words[i:i+size]) for i in range(0, len(words), size)]
+    return [" ".join(words[i : i + size]) for i in range(0, len(words), size)]
+
+
+def ensure_qdrant_collection():
+    """Ensures that the Qdrant collection exists before inserting data."""
+    collections = qdrant.get_collections()
+    collection_names = [col.name for col in collections.collections]
+
+    if "documents" not in collection_names:
+        qdrant.create_collection(
+            collection_name="documents",
+            vectors_config=models.VectorParams(size=384, distance=models.Distance.COSINE),
+        )
+
 
 def process_pdfs():
     """Processes and indexes PDFs from the 'pdfs' folder."""
+    # 🔹 Check if the Elasticsearch index exists before creating it
     if not es.indices.exists(index=INDEX_NAME):
         es.indices.create(index=INDEX_NAME, body={"settings": {}})
 
@@ -75,18 +93,21 @@ def process_pdfs():
 
                 doc_id += 1
 
-    # Store embeddings in Qdrant
-    qdrant.create_collection(
-        collection_name="documents",
-        vectors_config=models.VectorParams(size=384, distance=models.Distance.COSINE),
-    )
+    # Ensure the Qdrant collection exists before inserting data
+    ensure_qdrant_collection()
 
+    # Store embeddings in Qdrant
     qdrant.upsert(
         collection_name="documents",
-        points=[models.PointStruct(id=doc["id"], vector=doc["vector"], payload={"text": doc["text"]}) for doc in documents]
+        points=[
+            models.PointStruct(id=doc["id"], vector=doc["vector"], payload={"text": doc["text"]})
+            for doc in documents
+        ],
     )
 
     print("✅ PDFs processed & indexed successfully!")
 
+
 if __name__ == "__main__":
-    process_pdfs()
+    process_pdfs()  # Process PDFs before starting FastAPI
+    uvicorn.run(app, host="0.0.0.0", port=8000)
