@@ -11,6 +11,6 @@ if st.button("Search"):
     if response.status_code == 200:
         results = response.json().get("answers", [])
         for i, answer in enumerate(results):
-            st.write(f"*Answer {i+1}:* {answer}")
+            st.success(f"**Answer {i+1}:** {answer}")
     else:
         st.error("Error fetching response.")

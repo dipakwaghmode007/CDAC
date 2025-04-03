@@ -14,6 +14,7 @@ qdrant = QdrantClient("http://localhost:6333")  # Connect to Qdrant container
 es = Elasticsearch("http://localhost:9200")
 
 INDEX_NAME = "pdf_documents"
+CHUNK_SIZE = 256  # 🔹 Reduce chunk size for better search results
 
 class QueryRequest(BaseModel):
     query: str
@@ -22,17 +23,25 @@ class QueryRequest(BaseModel):
 def search_docs(request: QueryRequest):
     query_vector = embedding_model.encode(request.query).tolist()
 
-    # Search Qdrant for vector similarity
+    # 🔹 Search Qdrant for closest text chunks
     results = qdrant.search(
         collection_name="documents",
         query_vector=query_vector,
-        limit=5,
+        limit=3,  # Retrieve only top 3 matches
     )
 
-    # Retrieve relevant text
-    responses = [hit.payload["text"] for hit in results]
+    # Retrieve most relevant text chunks (not full PDFs)
+    extracted_answers = []
+    for hit in results:
+        text_chunk = hit.payload["text"]
+        extracted_answers.append(text_chunk[:400])  # Limit text to 400 characters
 
-    return {"answers": responses}
+    return {"answers": extracted_answers}
+
+def chunk_text(text, size=CHUNK_SIZE):
+    """Splits text into smaller, overlapping chunks for better search accuracy."""
+    words = text.split()
+    return [" ".join(words[i:i+size]) for i in range(0, len(words), size)]
 
 def process_pdfs():
     """Processes and indexes PDFs from the 'pdfs' folder."""
@@ -41,6 +50,7 @@ def process_pdfs():
 
     pdf_folder = "pdfs"
     documents = []
+    doc_id = 0
 
     for filename in os.listdir(pdf_folder):
         if filename.endswith(".pdf"):
@@ -52,12 +62,18 @@ def process_pdfs():
                 for page in pdf_doc:
                     text += page.get_text("text") + "\n"
 
-            # Generate embedding
-            vector = embedding_model.encode(text).tolist()
-            documents.append({"text": text, "vector": vector})
+            # 🔹 Break text into small chunks for better precision
+            text_chunks = chunk_text(text)
 
-            # Store in Elasticsearch
-            es.index(index=INDEX_NAME, body={"content": text})
+            for chunk in text_chunks:
+                # Generate embedding for each chunk
+                vector = embedding_model.encode(chunk).tolist()
+                documents.append({"id": doc_id, "text": chunk, "vector": vector})
+
+                # Store chunked data in Elasticsearch
+                es.index(index=INDEX_NAME, body={"content": chunk})
+
+                doc_id += 1
 
     # Store embeddings in Qdrant
     qdrant.create_collection(
@@ -67,7 +83,7 @@ def process_pdfs():
 
     qdrant.upsert(
         collection_name="documents",
-        points=[models.PointStruct(id=i, vector=doc["vector"], payload={"text": doc["text"]}) for i, doc in enumerate(documents)]
+        points=[models.PointStruct(id=doc["id"], vector=doc["vector"], payload={"text": doc["text"]}) for doc in documents]
     )
 
     print("✅ PDFs processed & indexed successfully!")
